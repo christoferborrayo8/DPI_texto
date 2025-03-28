@@ -1,3 +1,4 @@
+import uuid
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import easyocr
@@ -10,9 +11,16 @@ import os
 from spellchecker import SpellChecker
 from PIL import Image
 import concurrent.futures
+from dotenv import load_dotenv
 
+# ---------------- IMPORTACIONES ----------------
 app = Flask(__name__)
 CORS(app)
+
+# ---------------- CARGA DE VARIABLES DE ENTORNO ----------------
+load_dotenv()
+MODEL_STORAGE_DIR = os.getenv("MODEL_STORAGE_DIR", "/app/models")
+print(f"Directorio de almacenamiento de modelos: {MODEL_STORAGE_DIR}")
 
 # ---------------- PREPROCESAMIENTO CON OPENCV ----------------
 def preprocess_image(image_path):
@@ -27,8 +35,9 @@ def ocr_tesseract(image):
     return pytesseract.image_to_string(image, lang="spa+eng")
 
 # ---------------- OCR CON EASYOCR ----------------
+reader = easyocr.Reader(["en", "es"], model_storage_directory=MODEL_STORAGE_DIR, download_enabled=False)
 def ocr_easyocr(image_path):
-    reader = easyocr.Reader(["en", "es"])
+    global reader
     text = reader.readtext(image_path, detail=0)
     return " ".join(text)
 
@@ -46,6 +55,7 @@ def clean_text(text):
     corrected_text = " ".join([spell.correction(word) or word for word in words])
     return corrected_text
 
+# ---------------- EXTRACCIÓN DE DATOS ----------------
 def extract_info(text):
     dpi_pattern = r"\b\d{4}\s?\d{5}\s?\d{4}\b" 
     fecha_pattern = r"\b\d{2}\s?[A-Z]{3}\s?\d{4}\b"
@@ -99,34 +109,26 @@ def process_document(image_path, engine="tesseract"):
 # ---------------- FUSIÓN DE RESULTADOS ----------------
 def merge_results(results_list):
     merged_data = {}
-    # Función para encontrar el mejor valor basado en coincidencias de palabras
     def find_best_match(field):
         values = [result[field] for result in results_list if result.get(field)]
         if not values:
-            return None  # No hay valores para este campo
-        # Si solo hay un valor, lo retornamos directamente
+            return None 
         if len(values) == 1:
             return values[0]      
-        # Convertir valores en conjuntos de palabras
         word_sets = [set(value.split()) for value in values]
-        # Comparar cada par de valores para encontrar el mejor match
         for i in range(len(word_sets)):
             for j in range(i + 1, len(word_sets)):
                 common_words = word_sets[i] & word_sets[j]
-                if len(common_words) >= 2:  # Si hay al menos 2 palabras iguales
-                    return " ".join(common_words)  # Retornar solo palabras en común
-        # Si no hay suficientes coincidencias, retornamos el primer valor encontrado
+                if len(common_words) >= 2: 
+                    return " ".join(common_words)  
         return values[0]
-    # Claves que se llenan con el primer valor válido encontrado
     for key in ["DPI", "Fecha de Nacimiento", "Genero"]:
         for result in results_list:
             if result.get(key):
                 merged_data[key] = result[key]
                 break  
-    # Claves que requieren comparación
     for key in ["Nombre", "Apellido"]:
         merged_data[key] = find_best_match(key)
-    
     return merged_data
 
 # ---------------- PROCESAMIENTO CON ÍNDICE ----------------
@@ -152,16 +154,18 @@ def ejecutar(image_path):
         estado = "Error"
     else:
         estado = "Incompleto"
-    final_result["estado"] = estado
+    final_result["Estado"] = estado
     return final_result
 
+# ----------------- RUTAS DE LA API ----------------
 @app.route("/obtener_texto", methods=["POST"])
 def imagen_a_texto():
     if "image" not in request.files:
         return jsonify({"error": "No se ha enviado una imagen"}), 400
     file = request.files["image"]
     type_param = request.form.get("type", "default")
-    image_path = "temp_image.png"
+    extension_imagen = file.filename.split(".")[-1].lower()
+    image_path = uuid.uuid4().hex + "." + extension_imagen
     file.save(image_path)
     if type_param == "dpi-adelante":
         extracted_text = ejecutar(image_path)
@@ -170,5 +174,6 @@ def imagen_a_texto():
     os.remove(image_path) 
     return jsonify({"text": extracted_text})
 
+# ----------------- INICIO DE LA APLICACIÓN ----------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
